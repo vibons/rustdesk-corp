@@ -8,10 +8,19 @@ on:
         default: true
       upload-tag:
         type: string
-        default: '1.5.1-2'
+        default: '1.5.1-sos-23'
       publish-update-metadata:
         type: boolean
         default: false
+      corp-host:
+        type: string
+        default: '192.168.91.23'
+      corp-key:
+        type: string
+        default: 'lLN4ihwkY06nE84yeJxr9GpfdnSuexIn1VrkVyc09qQ='
+      corp-api:
+        type: string
+        default: 'http://192.168.91.23:21114'
   workflow_call:
     inputs:
       upload-artifact:
@@ -206,16 +215,108 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Inject corporate server config
+      - name: Inject corporate SOS config
         shell: bash
+        env:
+          CORP_HOST: ${{ inputs.corp-host }}
+          CORP_KEY: ${{ inputs.corp-key }}
+          CORP_API: ${{ inputs.corp-api }}
         run: |
-          set -e
-          CFG=libs/hbb_common/src/config.rs
-          sed -i 's|rs-ny.rustdesk.com|192.168.91.23|g' "$CFG"
-          sed -i 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|lLN4ihwkY06nE84yeJxr9GpfdnSuexIn1VrkVyc09qQ=|g' "$CFG"
-          sed -i 's|https://admin.rustdesk.com|http://192.168.91.23:21114|g' src/common.rs
-          grep -n 'RENDEZVOUS_SERVERS' "$CFG" | head -2
-
+          python3 - <<'PY'
+          import os
+          host = os.environ.get("CORP_HOST") or "192.168.91.23"
+          key  = os.environ.get("CORP_KEY")  or "lLN4ihwkY06nE84yeJxr9GpfdnSuexIn1VrkVyc09qQ="
+          api  = os.environ.get("CORP_API")  or "http://192.168.91.23:21114"
+          cfg = "libs/hbb_common/src/config.rs"
+          s = open(cfg, encoding="utf-8").read()
+          
+          def rep_all(old, new, minimum=1):
+              global s
+              n = s.count(old)
+              assert n >= minimum, "expected >=%d of %r, got %d" % (minimum, old[:60], n)
+              s = s.replace(old, new)
+          
+          def rep_one(old, new):
+              global s
+              n = s.count(old)
+              assert n == 1, "expected exactly 1 of %r, got %d" % (old[:70], n)
+              s = s.replace(old, new, 1)
+          
+          # 1. self-hosted server parameters
+          rep_all("rs-ny.rustdesk.com", host)
+          rep_one("OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=", key)
+          
+          # 2. custom client identity: is_custom_client() == true disables the whole
+          #    update chain (check_software_update / manual_update / verified_update)
+          rep_one('RwLock::new("RustDesk".to_owned())', 'RwLock::new("CorpSOS".to_owned())')
+          
+          # 3. HARD_SETTINGS: official incoming-only mini window + hide settings/ab/account
+          #    + portable-only (no install wizard, and --update is short-circuited)
+          rep_one(
+              '    pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();',
+              '''    pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = {
+                  let mut m = std::collections::HashMap::new();
+                  m.insert("conn-type".to_string(), "incoming".to_string());
+                  m.insert("disable-settings".to_string(), "Y".to_string());
+                  m.insert("disable-ab".to_string(), "Y".to_string());
+                  m.insert("disable-account".to_string(), "Y".to_string());
+                  m.insert("disable-installation".to_string(), "Y".to_string());
+                  RwLock::new(m)
+              };''')
+          
+          DEFAULTS = '''        for (k, v) in [
+                      ("enable-check-update", "N"),
+                      ("allow-auto-update", "N"),
+                      ("hide-help-cards", "Y"),
+                      ("hide-powered-by-me", "Y"),
+                  ] {
+                      if !config.options.contains_key(k) {
+                          config.options.insert(k.to_string(), v.to_string());
+                          store = true;
+                      }
+                  }
+          '''
+          
+          # 4. LocalConfig defaults (where check_software_update reads its option)
+          rep_one(
+              '''    fn load() -> LocalConfig {
+                  Config::load_::<LocalConfig>("_local")
+              }''',
+              '''    fn load() -> LocalConfig {
+                  let mut config = Config::load_::<LocalConfig>("_local");
+                  let mut store = false;
+          ''' + DEFAULTS + '''        if store { config.store(); }
+                  config
+              }''')
+          
+          # 5. Config2 defaults (Flutter reads these through get_option)
+          rep_one(
+              '''    fn load() -> Config2 {
+                  let mut config = Config::load_::<Config2>("2");
+                  let mut store = false;''',
+              '''    fn load() -> Config2 {
+                  let mut config = Config::load_::<Config2>("2");
+                  let mut store = false;
+          ''' + DEFAULTS)
+          open(cfg, "w", encoding="utf-8").write(s)
+          
+          # 6. API fallback in src/common.rs
+          c = "src/common.rs"
+          t = open(c, encoding="utf-8").read()
+          assert t.count("https://admin.rustdesk.com") >= 1
+          open(c, "w", encoding="utf-8").write(t.replace("https://admin.rustdesk.com", api))
+          
+          # 7. verification output for the build log
+          print("SOS host =", host)
+          print("SOS api  =", api)
+          print("SOS key  =", key[:8] + "...")
+          for line in s.splitlines():
+              if "pub const RENDEZVOUS_SERVERS" in line or "pub static ref APP_NAME" in line:
+                  print("  " + line.strip())
+          print("  conn-type=incoming:", '"conn-type".to_string(), "incoming"' in s)
+          print("  disable-installation:", '"disable-installation".to_string(), "Y"' in s)
+          print("  update defaults:", s.count('"enable-check-update", "N"'))
+          PY
       - name: Restore bridge files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
