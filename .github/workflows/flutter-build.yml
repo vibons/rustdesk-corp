@@ -8,7 +8,7 @@ on:
         default: true
       upload-tag:
         type: string
-        default: '1.5.1-1'
+        default: '1.5.1-2'
       publish-update-metadata:
         type: boolean
         default: false
@@ -211,9 +211,9 @@ jobs:
         run: |
           set -e
           CFG=libs/hbb_common/src/config.rs
-          sed -i 's|rs-ny.rustdesk.com|192.168.91.24|g' "$CFG"
-          sed -i 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|nJJlHIsuvoqeOcAGXyAM410jVzH4LaRedxf1vGEU3aU=|g' "$CFG"
-          sed -i 's|https://admin.rustdesk.com|http://192.168.91.24:21114|g' src/common.rs
+          sed -i 's|rs-ny.rustdesk.com|192.168.91.23|g' "$CFG"
+          sed -i 's|OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=|lLN4ihwkY06nE84yeJxr9GpfdnSuexIn1VrkVyc09qQ=|g' "$CFG"
+          sed -i 's|https://admin.rustdesk.com|http://192.168.91.23:21114|g' src/common.rs
           grep -n 'RENDEZVOUS_SERVERS' "$CFG" | head -2
 
       - name: Restore bridge files
