@@ -371,13 +371,28 @@ jobs:
       # windows-x64-release.zip is built for the 3.24-era x64 engine (matches FLUTTER_VERSION).
       - name: Replace engine with rustdesk custom flutter engine
         if: ${{ matrix.job.arch == 'x86_64' }}
+        shell: pwsh
         run: |
           flutter doctor -v
           flutter precache --windows
-          Invoke-WebRequest -Uri https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip -OutFile windows-x64-release.zip
-          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release
+          $url = 'https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip'
+          $urls = @($url, "https://ghfast.top/$url", "https://gh-proxy.com/$url", "https://ghproxy.net/$url")
+          $ok = $false
+          foreach ($u in $urls) {
+            for ($i = 1; $i -le 5; $i++) {
+              Write-Host "engine fetch try $i : $u"
+              & curl.exe -L --fail --silent --show-error --retry 3 --retry-all-errors `
+                --retry-delay 5 --connect-timeout 30 --max-time 900 -o windows-x64-release.zip $u
+              if ($LASTEXITCODE -eq 0 -and (Test-Path windows-x64-release.zip) -and ((Get-Item windows-x64-release.zip).Length -ge 10MB)) {
+                $ok = $true; break
+              }
+              Start-Sleep -Seconds 6
+            }
+            if ($ok) { break }
+          }
+          if (-not $ok) { throw "engine zip download failed on all mirrors" }
+          Expand-Archive -Path windows-x64-release.zip -DestinationPath windows-x64-release -Force
           mv -Force windows-x64-release/*  C:/hostedtoolcache/windows/flutter/stable-${{ env.FLUTTER_VERSION }}-x64/bin/cache/artifacts/engine/windows-x64-release/
-
       - name: Patch flutter
         # x64 stays on Flutter 3.24.5, which needs the dropdown filter patch.
         # arm64 is on Flutter 3.44 (patched separately below) and does not use this patch.
@@ -430,31 +445,22 @@ jobs:
                 Write-Host "fetch try $i : $u"
                 & curl.exe -L --fail --silent --show-error --retry 3 --retry-all-errors `
                   --retry-delay 5 --connect-timeout 30 --max-time 900 -o $out $u
-                if ($LASTEXITCODE -eq 0 -and (Test-Path $out) -and ((Get-Item $out).Length -ge $minBytes)) {
-                  Write-Host "fetch OK ($([int]((Get-Item $out).Length / 1MB)) MB)"
-                  return $true
-                }
+                if ($LASTEXITCODE -eq 0 -and (Test-Path $out) -and ((Get-Item $out).Length -ge $minBytes)) { return $true }
                 Start-Sleep -Seconds 6
               }
             }
             return $false
           }
+          # run-vcpkg already cloned the repo into C:\vcpkg; it only failed while
+          # bootstrap-vcpkg.bat tried to fetch vcpkg.exe. Just supply the binary.
           $root = 'C:\vcpkg'
           New-Item -ItemType Directory -Force -Path $root | Out-Null
-          if (-not (Test-Path "$root\vcpkg.json")) {
-            & git clone https://github.com/microsoft/vcpkg $root
-            if ($LASTEXITCODE -ne 0) { throw "vcpkg clone failed" }
-          }
-          & git -C $root fetch --force origin
-          & git -C $root checkout -f $env:VCPKG_COMMIT_ID
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg checkout failed" }
           $url = 'https://github.com/microsoft/vcpkg-tool/releases/download/2026-07-27/vcpkg.exe'
           $tmp = "$env:RUNNER_TEMP\vcpkg-tool.exe"
           if (-not (Fetch-WithRetry $url $tmp 1MB)) { throw "vcpkg.exe download failed on all mirrors" }
           Copy-Item $tmp "$root\vcpkg.exe" -Force
           Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_ROOT=$root"
           & "$root\vcpkg.exe" version
-
       - name: Install vcpkg dependencies
         env:
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ matrix.job.vcpkg-triplet }}
