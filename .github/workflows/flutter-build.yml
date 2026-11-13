@@ -173,9 +173,12 @@ jobs:
           #!/usr/bin/env python3
           """Inject dual-network corp config + custom product name into RustDesk 1.5.3.
           
-          ONE exe contains BOTH parameter sets:
-            * default (no env var)      -> 192.168.91.24  unified server, ZERO switching
-            * RUSTDESK_NET=mes          -> 192.168.91.23  standby, transition-period only
+          ONE exe contains BOTH parameter sets plus ONE shared auto-probe rule:
+            * auto (default)  -> probe 192.168.91.24 first, fall back to 192.168.91.23
+                                 only when .24 is unreachable. Every machine runs the
+                                 same rule, so they all land on the same server and the
+                                 address book is unified with ZERO manual switching.
+            * RUSTDESK_NET=office / =mes -> force a network (transition escape hatch)
           
           Implementation: Config::get_option() resolves through
               get_or(&OVERWRITE_SETTINGS, &CONFIG2.options, &DEFAULT_SETTINGS, k)
@@ -263,13 +266,36 @@ jobs:
           pub const CORP_KEY_ALT: &str = "%s";
           pub const CORP_API_ALT: &str = "%s";
           
-          /// Two in-house networks compiled into one binary.
-          /// Default = unified 192.168.91.24 (no switching at all).
-          /// RUSTDESK_NET=mes = standby 192.168.91.23 (transition period only).
+          /// One binary, two in-house networks, ONE shared auto-probe rule.
+          /// Every machine (control side AND controlled side) runs this same rule, so
+          /// they all land on the same server: prefer 192.168.91.24; fall back to
+          /// 192.168.91.23 only when .24 is unreachable. The result is an automatically
+          /// unified address book - the user never picks a network and never switches.
+          /// RUSTDESK_NET=office / =mes forces a choice (transition-period escape hatch).
+          fn corp_server_reachable(host: &str) -> bool {
+              use std::net::{SocketAddr, TcpStream};
+              use std::time::Duration;
+              let addr: SocketAddr = match format!("{}:{}", host, 21116).parse() {
+                  Ok(a) => a,
+                  Err(_) => return false,
+              };
+              TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
+          }
+          
           pub fn corp_net_settings() -> HashMap<String, String> {
-              let mes = std::env::var("RUSTDESK_NET")
-                  .map(|v| v.eq_ignore_ascii_case("mes"))
-                  .unwrap_or(false);
+              let forced = std::env::var("RUSTDESK_NET").unwrap_or_default();
+              let mes = if forced.eq_ignore_ascii_case("mes") {
+                  true
+              } else if forced.eq_ignore_ascii_case("office") {
+                  false
+              } else if corp_server_reachable(CORP_HOST_MAIN)
+                  || corp_server_reachable(CORP_HOST_MAIN) {
+                  false
+              } else if corp_server_reachable(CORP_HOST_ALT) {
+                  true
+              } else {
+                  false
+              };
               let (host, key, api) = if mes {
                   (CORP_HOST_ALT, CORP_KEY_ALT, CORP_API_ALT)
               } else {
@@ -374,11 +400,12 @@ jobs:
           print("CORP mode         =", mode)
           print("CORP name         =", ascii(name))
           print("CORP display      =", disp)
-          print("NET default       =", HOST_MAIN, "key", KEY_MAIN[:8] + "...")
-          print("NET standby (env) =", HOST_ALT, "key", KEY_ALT[:8] + "...")
+          print("NET auto primary  =", HOST_MAIN, "key", KEY_MAIN[:8] + "...")
+          print("NET auto fallback =", HOST_ALT, "key", KEY_ALT[:8] + "...")
           print("both sets in binary:", all(x in s for x in (HOST_MAIN, HOST_ALT, KEY_MAIN, KEY_ALT, API_MAIN, API_ALT)))
           print("OVERWRITE_SETTINGS:", 'RwLock::new(corp_net_settings())' in s)
-          print("RUSTDESK_NET gate :", 'eq_ignore_ascii_case("mes")' in s)
+          print("auto-probe gate   :", 'corp_server_reachable' in s and 'connect_timeout' in s)
+          print("forced net gate   :", 'eq_ignore_ascii_case("mes")' in s and 'eq_ignore_ascii_case("office")' in s)
           for line in s.splitlines():
               if "pub const RENDEZVOUS_SERVERS" in line or "pub static ref APP_NAME" in line:
                   print("  " + ascii(line.strip()))
