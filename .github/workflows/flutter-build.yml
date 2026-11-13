@@ -179,6 +179,7 @@ jobs:
           CORP_NAME: ${{ inputs.corp-name }}
           CORP_DISPLAY: ${{ inputs.corp-display }}
           CORP_MODE: ${{ inputs.corp-mode }}
+          PYTHONIOENCODING: utf-8
         run: |
           python3 - <<'PY'
           #!/usr/bin/env python3
@@ -196,6 +197,14 @@ jobs:
             * flutter/windows/runner/Runner.rc               : ProductName / FileDescription
           """
           import os
+          import sys
+          
+          # Windows runners default stdout to cp1252/charmap. Printing a Chinese
+          # product name raises UnicodeEncodeError even though the file edits succeed.
+          try:
+              sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          except Exception:
+              pass
           
           host = os.environ["CORP_HOST"]
           key = os.environ["CORP_KEY"]
@@ -338,11 +347,11 @@ jobs:
           print("CORP host    =", host)
           print("CORP api     =", api)
           print("CORP key     =", key[:8] + "...")
-          print("CORP name    =", name)
+          print("CORP name    =", ascii(name))
           print("CORP display =", disp)
           for line in s.splitlines():
               if "pub const RENDEZVOUS_SERVERS" in line or "pub static ref APP_NAME" in line:
-                  print("  " + line.strip())
+                  print("  " + ascii(line.strip()))
           print("  conn-type=incoming   :", '"conn-type".to_string(), "incoming"' in s)
           print("  disable-installation :", '"disable-installation".to_string(), "Y"' in s)
           print("  update defaults      :", s.count('"enable-check-update", "N"'))
