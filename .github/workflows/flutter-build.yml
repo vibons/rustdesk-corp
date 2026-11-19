@@ -8,19 +8,31 @@ on:
         default: true
       upload-tag:
         type: string
-        default: "1.5.3-dual-std"
+        default: "1.5.3-lite-24"
       publish-update-metadata:
         type: boolean
         default: false
+      corp-host:
+        type: string
+        default: "192.168.91.24"
+      corp-key:
+        type: string
+        default: "nJJlHIsuvoqeOcAGXyAM410jVzH4LaRedxf1vGEU3aU="
+      corp-api:
+        type: string
+        default: "http://192.168.91.24:21114"
       corp-name:
         type: string
-        default: "RustDesk_Unified"
+        default: "RustDesk_Lite_Office"
       corp-display:
         type: string
-        default: "RustDesk Unified"
+        default: "RustDesk Lite Office"
       corp-mode:
         type: string
-        default: "standard"
+        default: "lite"
+      corp-netname:
+        type: string
+        default: "办公网络"
 # NOTE: F-Droid builder script 'flutter/build_fdroid.sh' reads environment
 # variables from this workflow!
 #
@@ -161,68 +173,53 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Inject corporate dual-net config
+      - name: Inject corporate 1.5.3 config
         shell: bash
         env:
+          CORP_HOST: ${{ inputs.corp-host }}
+          CORP_KEY: ${{ inputs.corp-key }}
+          CORP_API: ${{ inputs.corp-api }}
           CORP_NAME: ${{ inputs.corp-name }}
           CORP_DISPLAY: ${{ inputs.corp-display }}
           CORP_MODE: ${{ inputs.corp-mode }}
+          CORP_NETNAME: ${{ inputs.corp-netname }}
           PYTHONIOENCODING: utf-8
         run: |
           python3 - <<'PY'
           #!/usr/bin/env python3
-          """Inject dual-network corp config + custom product name into RustDesk 1.5.3.
+          """Inject corporate config + UI tweaks into RustDesk 1.5.3 sources.
           
-          ONE exe contains BOTH parameter sets plus ONE shared auto-probe rule:
-            * auto (default)  -> probe 192.168.91.24 first, fall back to 192.168.91.23
-                                 only when .24 is unreachable. Every machine runs the
-                                 same rule, so they all land on the same server and the
-                                 address book is unified with ZERO manual switching.
-            * RUSTDESK_NET=office / =mes -> force a network (transition escape hatch)
+          Based on inject_v153.py, adds three UI/behaviour changes requested 2026-11-19:
+            * "Your Desktop" heading -> network name (办公网络 / MES网络), heading only
+            * one-time password: numeric only + one code per calendar day (deterministic)
+            * desktop title bar: show the custom product name (showTitle default true)
           
-          Implementation: Config::get_option() resolves through
-              get_or(&OVERWRITE_SETTINGS, &CONFIG2.options, &DEFAULT_SETTINGS, k)
-          so initialising the OVERWRITE_SETTINGS lazy_static from corp_net_settings()
-          covers custom-rendezvous-server / key / relay-server / api-server in one shot.
-          No const replacements needed at runtime, no startup-order race, and the
-          settings page fields become read-only (is_option_can_save short-circuits).
-          
-          Compile-time constants are still set to the .24 set as a belt-and-braces
-          fallback (RENDEZVOUS_SERVERS / RS_PUB_KEY / admin.rustdesk.com).
-          
-          Changes:
-            * libs/hbb_common/src/config.rs : constants, OVERWRITE_SETTINGS, corp_net_settings(),
-                                              APP_NAME, HARD_SETTINGS, update defaults
-            * src/common.rs                 : corporate API fallback
-            * flutter/lib/desktop/widgets/tabbar_widget.dart : custom title-bar text
-            * flutter/windows/runner/main.cpp                : fallback app name
-            * flutter/windows/runner/Runner.rc               : ProductName / FileDescription
+          All parameters come from workflow_dispatch inputs via environment variables.
+          Runs inside the GitHub Actions Windows job right after checkout.
           """
           import os
           import sys
           
-          # Windows runners default stdout to cp1252/charmap. Printing a Chinese
-          # product name raises UnicodeEncodeError even though the file edits succeed.
+          # Windows runners default stdout to cp1252/charmap. Printing Chinese raises
+          # UnicodeEncodeError even though file edits succeed -> force UTF-8 + ascii().
           try:
               sys.stdout.reconfigure(encoding="utf-8", errors="replace")
           except Exception:
               pass
           
-          HOST_MAIN = "192.168.91.24"
-          KEY_MAIN = "nJJlHIsuvoqeOcAGXyAM410jVzH4LaRedxf1vGEU3aU="
-          API_MAIN = "http://192.168.91.24:21114"
-          HOST_ALT = "192.168.91.23"
-          KEY_ALT = "lLN4ihwkY06nE84yeJxr9GpfdnSuexIn1VrkVyc09qQ="
-          API_ALT = "http://192.168.91.23:21114"
-          
+          host = os.environ["CORP_HOST"]
+          key = os.environ["CORP_KEY"]
+          api = os.environ["CORP_API"]
           name = os.environ["CORP_NAME"]
           disp = os.environ["CORP_DISPLAY"]
           mode = os.environ["CORP_MODE"]
+          netname = os.environ["CORP_NETNAME"]  # e.g. 办公网络 / MES网络
           
           assert mode in ("lite", "standard"), mode
           assert name and not any(ch in name for ch in '\\/:*?"<>|\r\n'), name
           assert disp.isascii() and '"' not in disp and '\\' not in disp, disp
           assert name != "RustDesk" and disp != "RustDesk"
+          assert netname and '"' not in netname and '\\' not in netname, netname
           
           ROOT = os.environ.get("CORP_SRC", ".")
           
@@ -250,81 +247,24 @@ jobs:
               s = s.replace(old, new, 1)
           
           
-          # 1. compile-time fallback constants -> unified (.24) network
-          rep_all("rs-ny.rustdesk.com", HOST_MAIN)
-          rep_one("OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=", KEY_MAIN)
+          # 1. self-hosted ID / relay server + public key
+          rep_all("rs-ny.rustdesk.com", host)
+          rep_one("OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=", key)
           
-          # 2. APP_NAME -> custom name (native window title + is_custom_client())
+          # 2. APP_NAME -> custom name (drives native title + is_custom_client)
           rep_one('RwLock::new("RustDesk".to_owned())',
                   'RwLock::new("' + name + '".to_owned())')
           
-          # 3. OVERWRITE_SETTINGS: the single injection point that carries BOTH sets.
-          CORP_FN = '''pub const CORP_HOST_MAIN: &str = "%s";
-          pub const CORP_KEY_MAIN: &str = "%s";
-          pub const CORP_API_MAIN: &str = "%s";
-          pub const CORP_HOST_ALT: &str = "%s";
-          pub const CORP_KEY_ALT: &str = "%s";
-          pub const CORP_API_ALT: &str = "%s";
-          
-          /// One binary, two in-house networks, ONE shared auto-probe rule.
-          /// Every machine (control side AND controlled side) runs this same rule, so
-          /// they all land on the same server: prefer 192.168.91.24; fall back to
-          /// 192.168.91.23 only when .24 is unreachable. The result is an automatically
-          /// unified address book - the user never picks a network and never switches.
-          /// RUSTDESK_NET=office / =mes forces a choice (transition-period escape hatch).
-          fn corp_server_reachable(host: &str) -> bool {
-              use std::net::{SocketAddr, TcpStream};
-              use std::time::Duration;
-              let addr: SocketAddr = match format!("{}:{}", host, 21116).parse() {
-                  Ok(a) => a,
-                  Err(_) => return false,
-              };
-              TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
-          }
-          
-          pub fn corp_net_settings() -> HashMap<String, String> {
-              let forced = std::env::var("RUSTDESK_NET").unwrap_or_default();
-              let mes = if forced.eq_ignore_ascii_case("mes") {
-                  true
-              } else if forced.eq_ignore_ascii_case("office") {
-                  false
-              } else if corp_server_reachable(CORP_HOST_MAIN)
-                  || corp_server_reachable(CORP_HOST_MAIN) {
-                  false
-              } else if corp_server_reachable(CORP_HOST_ALT) {
-                  true
-              } else {
-                  false
-              };
-              let (host, key, api) = if mes {
-                  (CORP_HOST_ALT, CORP_KEY_ALT, CORP_API_ALT)
-              } else {
-                  (CORP_HOST_MAIN, CORP_KEY_MAIN, CORP_API_MAIN)
-              };
-              let mut m: HashMap<String, String> = HashMap::new();
-              m.insert("custom-rendezvous-server".to_owned(), host.to_owned());
-              m.insert("key".to_owned(), key.to_owned());
-              m.insert("relay-server".to_owned(), host.to_owned());
-              m.insert("api-server".to_owned(), api.to_owned());
-              m
-          }
-          ''' % (HOST_MAIN, KEY_MAIN, API_MAIN, HOST_ALT, KEY_ALT, API_ALT)
-          
-          rep_one('pub const RENDEZVOUS_PORT: i32 = 21116;',
-                  CORP_FN + 'pub const RENDEZVOUS_PORT: i32 = 21116;')
-          rep_one('    pub static ref OVERWRITE_SETTINGS: RwLock<HashMap<String, String>> = Default::default();',
-                  '    pub static ref OVERWRITE_SETTINGS: RwLock<HashMap<String, String>> = RwLock::new(corp_net_settings());')
-          
-          # 4. HARD_SETTINGS
-          #    lite     : official incoming-only SOS mini window + hide settings/ab/account
-          #    standard : full client, portable-only (no install page / no --install)
+          # 3. HARD_SETTINGS
           hard = []
           if mode == "lite":
               hard += ['m.insert("conn-type".to_string(), "incoming".to_string());',
                        'm.insert("disable-settings".to_string(), "Y".to_string());',
                        'm.insert("disable-ab".to_string(), "Y".to_string());',
                        'm.insert("disable-account".to_string(), "Y".to_string());']
-          hard += ['m.insert("disable-installation".to_string(), "Y".to_string());']
+          hard += ['m.insert("disable-installation".to_string(), "Y".to_string());',
+                   # numeric one-time password (6 digits, see password_security.rs)
+                   'm.insert("allow-numeric-one-time-password".to_string(), "Y".to_string());']
           hard_block = (
               '    pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = {\n'
               '        let mut m = std::collections::HashMap::new();\n'
@@ -334,8 +274,7 @@ jobs:
           rep_one('    pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();',
                   hard_block)
           
-          # 5. Belt-and-braces: kill check-update / auto-update / help cards in both
-          #    LocalConfig (read by check_software_update) and Config2 (read by Flutter).
+          # 4./5. update defaults in LocalConfig + Config2
           DEFAULTS = '''        for (k, v) in [
                       ("enable-check-update", "N"),
                       ("allow-auto-update", "N"),
@@ -369,13 +308,63 @@ jobs:
           t = open(cp, encoding="utf-8").read()
           assert t.count("https://admin.rustdesk.com") >= 1
           open(cp, "w", encoding="utf-8").write(
-              t.replace("https://admin.rustdesk.com", API_MAIN))
+              t.replace("https://admin.rustdesk.com", api))
+          
+          # --------------------------- password_security.rs: numeric + per-day code
+          # Replace the random get_auto_password() with a deterministic one that:
+          #   - always 6 digits
+          #   - derives from the LOCAL calendar date (Local::now, %Y%m%d) so a whole day
+          #     maps to one code; reopening / restarting within the day keeps the code
+          #   - rolls over automatically at 00:00 local time
+          # chrono 0.4 is already a dependency of the workspace.
+          psp = path("libs/hbb_common/src/password_security.rs")
+          pw = open(psp, encoding="utf-8").read()
+          old_pw = '''fn get_auto_password() -> String {
+              let len = temporary_password_length();
+              if Config::get_bool_option(crate::config::keys::OPTION_ALLOW_NUMERNIC_ONE_TIME_PASSWORD) {
+                  Config::get_auto_numeric_password(len)
+              } else {
+                  Config::get_auto_password(len)
+              }
+          }'''
+          assert pw.count(old_pw) == 1, "get_auto_password anchor: %d" % pw.count(old_pw)
+          new_pw = '''fn get_auto_password() -> String {
+              // Corporate build: 6-digit numeric code, stable for one calendar day.
+              // Same local date -> same code; rolls over at 00:00 local time.
+              let day = chrono::Local::now().format("%Y%m%d").to_string();
+              let mut h: u64 = 1469598103934665603u64; // FNV-1a offset basis
+              for b in day.as_bytes() {
+                  h ^= *b as u64;
+                  h = h.wrapping_mul(1099511628211u64);
+              }
+              // fold in a fixed per-build salt so the two networks differ
+              h ^= 0x5A17_C0DE_2026_1119u64;
+              h = h.wrapping_mul(1099511628211u64);
+              let code = (h % 1_000_000) as u32;
+              format!("{:06}", code)
+          }'''
+          pw = pw.replace(old_pw, new_pw, 1)
+          open(psp, "w", encoding="utf-8").write(pw)
+          
+          # -------------------------------------------- desktop_home_page.dart heading
+          # Heading only ("Your Desktop"), NOT the desk_tip helper line below it.
+          dhp = path("flutter/lib/desktop/pages/desktop_home_page.dart")
+          d = open(dhp, encoding="utf-8").read()
+          assert d.count('translate("Your Desktop")') == 1, d.count('translate("Your Desktop")')
+          d = d.replace('translate("Your Desktop")', '"' + netname + '"', 1)
+          open(dhp, "w", encoding="utf-8").write(d)
           
           # -------------------------------------------- Flutter custom title-bar text
           tbp = path("flutter/lib/desktop/widgets/tabbar_widget.dart")
           u = open(tbp, encoding="utf-8").read()
           assert u.count('"RustDesk"') == 1, u.count('"RustDesk"')
-          open(tbp, "w", encoding="utf-8").write(u.replace('"RustDesk"', '"' + name + '"', 1))
+          u = u.replace('"RustDesk"', '"' + name + '"', 1)
+          # showTitle default false -> true so the name is actually rendered in the
+          # self-drawn title bar (the empty top-left area in the screenshots).
+          old_st = '    this.showLogo = true,\n    this.showTitle = false,'
+          assert u.count(old_st) == 1, "showTitle default anchor: %d" % u.count(old_st)
+          u = u.replace(old_st, '    this.showLogo = true,\n    this.showTitle = true,', 1)
+          open(tbp, "w", encoding="utf-8").write(u)
           
           # ------------------------------------------- native window-title fallback
           mcp = path("flutter/windows/runner/main.cpp")
@@ -397,22 +386,21 @@ jobs:
           open(rcp, "w", encoding="utf-8").write(r)
           
           # ------------------------------------------------------------------ verify
-          print("CORP mode         =", mode)
-          print("CORP name         =", ascii(name))
-          print("CORP display      =", disp)
-          print("NET auto primary  =", HOST_MAIN, "key", KEY_MAIN[:8] + "...")
-          print("NET auto fallback =", HOST_ALT, "key", KEY_ALT[:8] + "...")
-          print("both sets in binary:", all(x in s for x in (HOST_MAIN, HOST_ALT, KEY_MAIN, KEY_ALT, API_MAIN, API_ALT)))
-          print("OVERWRITE_SETTINGS:", 'RwLock::new(corp_net_settings())' in s)
-          print("auto-probe gate   :", 'corp_server_reachable' in s and 'connect_timeout' in s)
-          print("forced net gate   :", 'eq_ignore_ascii_case("mes")' in s and 'eq_ignore_ascii_case("office")' in s)
+          print("CORP mode      =", mode)
+          print("CORP host      =", host)
+          print("CORP api       =", api)
+          print("CORP key       =", key[:8] + "...")
+          print("CORP name      =", ascii(name))
+          print("CORP display   =", disp)
+          print("CORP netname   =", ascii(netname))
           for line in s.splitlines():
               if "pub const RENDEZVOUS_SERVERS" in line or "pub static ref APP_NAME" in line:
                   print("  " + ascii(line.strip()))
           print("  conn-type=incoming   :", '"conn-type".to_string(), "incoming"' in s)
-          print("  disable-installation :", '"disable-installation".to_string(), "Y"' in s)
-          print("  update defaults      :", s.count('"enable-check-update", "N"'))
-          print("  admin.rustdesk.com   :", t.count("https://admin.rustdesk.com"), "-> replaced")
+          print("  numeric-otp          :", '"allow-numeric-one-time-password".to_string(), "Y"' in s)
+          print("  per-day password     :", 'chrono::Local::now().format("%Y%m%d")' in pw)
+          print("  heading replaced     :", ('"' + netname + '"') in d, '| Your Desktop left:', d.count('translate("Your Desktop")'))
+          print("  showTitle default    :", 'this.showTitle = true' in u)
           print("  tabbar RustDesk left :", u.count('"RustDesk"'), "-> replaced")
           print("  Runner.rc ProductName:", disp)
           PY
