@@ -310,12 +310,13 @@ jobs:
           open(cp, "w", encoding="utf-8").write(
               t.replace("https://admin.rustdesk.com", api))
           
-          # --------------------------- password_security.rs: numeric + per-day code
+          # --------------------------- password_security.rs: numeric + per-device per-day code
           # Replace the random get_auto_password() with a deterministic one that:
           #   - always 6 digits
-          #   - derives from the LOCAL calendar date (Local::now, %Y%m%d) so a whole day
-          #     maps to one code; reopening / restarting within the day keeps the code
-          #   - rolls over automatically at 00:00 local time
+          #   - seed = this machine's RustDesk ID (Config::get_id(), generated once on
+          #     first run and stored locally -> stable across restarts) + local date
+          #   - different machines -> different codes, even on the same day
+          #   - same machine + same date -> same code; rolls over at 00:00 local time
           # chrono 0.4 is already a dependency of the workspace.
           psp = path("libs/hbb_common/src/password_security.rs")
           pw = open(psp, encoding="utf-8").read()
@@ -329,17 +330,28 @@ jobs:
           }'''
           assert pw.count(old_pw) == 1, "get_auto_password anchor: %d" % pw.count(old_pw)
           new_pw = '''fn get_auto_password() -> String {
-              // Corporate build: 6-digit numeric code, stable for one calendar day.
-              // Same local date -> same code; rolls over at 00:00 local time.
+              // Corporate build: 6-digit numeric code, unique per device, stable per day.
+              // Seed = this machine's RustDesk ID (generated once, stored in local config,
+              // stable across restarts) + local calendar date.
+              //   - different machines -> different codes even on the same day
+              //   - same machine, same date -> same code
+              //   - rolls over automatically at 00:00 local time
               let day = chrono::Local::now().format("%Y%m%d").to_string();
+              let device = Config::get_id();
               let mut h: u64 = 1469598103934665603u64; // FNV-1a offset basis
+              // fold in the per-device ID first
+              for b in device.as_bytes() {
+                  h ^= *b as u64;
+                  h = h.wrapping_mul(1099511628211u64);
+              }
+              // fixed corporate salt
+              h ^= 0x5A17_C0DE_2026_1119u64;
+              h = h.wrapping_mul(1099511628211u64);
+              // then the calendar day
               for b in day.as_bytes() {
                   h ^= *b as u64;
                   h = h.wrapping_mul(1099511628211u64);
               }
-              // fold in a fixed per-build salt so the two networks differ
-              h ^= 0x5A17_C0DE_2026_1119u64;
-              h = h.wrapping_mul(1099511628211u64);
               let code = (h % 1_000_000) as u32;
               format!("{:06}", code)
           }'''
@@ -398,7 +410,8 @@ jobs:
                   print("  " + ascii(line.strip()))
           print("  conn-type=incoming   :", '"conn-type".to_string(), "incoming"' in s)
           print("  numeric-otp          :", '"allow-numeric-one-time-password".to_string(), "Y"' in s)
-          print("  per-day password     :", 'chrono::Local::now().format("%Y%m%d")' in pw)
+          print("  per-device daily code:", 'Config::get_id()' in pw and
+                'chrono::Local::now().format("%Y%m%d")' in pw and 'device.as_bytes()' in pw)
           print("  heading replaced     :", ('"' + netname + '"') in d, '| Your Desktop left:', d.count('translate("Your Desktop")'))
           print("  showTitle default    :", 'this.showTitle = true' in u)
           print("  tabbar RustDesk left :", u.count('"RustDesk"'), "-> replaced")
